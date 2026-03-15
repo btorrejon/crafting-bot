@@ -1,9 +1,12 @@
+import os
 import asyncio
+import threading
 import discord
 from discord.ext import commands
+from flask import Flask
 
-TOKEN = "MTQ4MTQ1MjQzNDM2NTYxMjI3Mw.GOp2nH.nlTFb1oo6kmqN5ZSwOYjdUAAaWCtRCEv-Mz9ZU"
-TICKET_CHANNEL_ID = 1481103607670505472
+TOKEN = os.getenv("DISCORD_TOKEN")
+TICKET_CHANNEL_ID = int(os.getenv("TICKET_CHANNEL_ID", "0"))
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -11,6 +14,16 @@ intents.members = True
 intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Flask server for Render
+app = Flask(__name__)
+
+@app.get("/")
+def health():
+    return "Bot is running", 200
+
+def run_web():
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
 
 
 CATEGORY_CONFIG = {
@@ -53,6 +66,7 @@ class AbortCraftView(discord.ui.View):
 
     @discord.ui.button(label="Abort Crafting Request", style=discord.ButtonStyle.red, emoji="✖️")
     async def abort(self, interaction: discord.Interaction, button: discord.ui.Button):
+
         if not isinstance(interaction.channel, discord.Thread):
             await interaction.response.send_message(
                 "This button can only be used inside a ticket thread.",
@@ -78,6 +92,7 @@ class CloseNowView(discord.ui.View):
 
     @discord.ui.button(label="Close Now", style=discord.ButtonStyle.red, emoji="🗑️")
     async def close_now(self, interaction: discord.Interaction, button: discord.ui.Button):
+
         if not can_close_thread(interaction.user, self.requester_id):
             await interaction.response.send_message(
                 "Only the thread creator or an admin can close this.",
@@ -97,6 +112,7 @@ class CompleteCraftView(discord.ui.View):
 
     @discord.ui.button(label="Completed", style=discord.ButtonStyle.green, emoji="✅")
     async def complete(self, interaction: discord.Interaction, button: discord.ui.Button):
+
         role = discord.utils.get(interaction.guild.roles, name=self.crafter_role)
 
         if role is None or role not in interaction.user.roles:
@@ -115,10 +131,6 @@ class CompleteCraftView(discord.ui.View):
             await interaction.channel.send(
                 f"{requester.mention} The crafting order is completed, this thread will now close in 3 minutes."
             )
-        else:
-            await interaction.channel.send(
-                "The crafting order is completed, this thread will now close in 3 minutes."
-            )
 
         await interaction.channel.edit(locked=True)
         await interaction.channel.send(view=CloseNowView(self.requester_id))
@@ -128,12 +140,16 @@ class CompleteCraftView(discord.ui.View):
 
 
 async def handle_final_request(interaction, display_label, role_name):
+
     user = interaction.user
     thread = interaction.channel
     guild = interaction.guild
 
     await thread.edit(name=f"{display_label} - {user.name}")
-    await thread.send("Please list all the things you want crafted.")
+
+    await interaction.response.send_message(
+        "Please list all the things you want crafted."
+    )
 
     def check(m):
         return m.author == user and m.channel == thread
@@ -146,10 +162,6 @@ async def handle_final_request(interaction, display_label, role_name):
         await thread.send(
             f"{role.mention} {user.display_name} needs an item crafted: **{msg.content}**"
         )
-    else:
-        await thread.send(
-            f"{user.display_name} needs an item crafted: **{msg.content}**"
-        )
 
     await thread.send(
         "Click below when this crafting request has been completed.",
@@ -158,7 +170,9 @@ async def handle_final_request(interaction, display_label, role_name):
 
 
 class SubcategorySelect(discord.ui.Select):
+
     def __init__(self, category):
+
         self.category = category
         sub = CATEGORY_CONFIG[category]["suboptions"]
 
@@ -172,10 +186,12 @@ class SubcategorySelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
+
         choice = self.values[0]
         role = CATEGORY_CONFIG[self.category]["suboptions"][choice]
 
         self.disabled = True
+
         await interaction.response.edit_message(
             content=f"Selected: **{choice}**",
             view=self.view
@@ -185,13 +201,16 @@ class SubcategorySelect(discord.ui.Select):
 
 
 class SubcategoryView(discord.ui.View):
+
     def __init__(self, category):
         super().__init__(timeout=300)
         self.add_item(SubcategorySelect(category))
 
 
 class CategorySelect(discord.ui.Select):
+
     def __init__(self):
+
         options = [
             discord.SelectOption(label="Armor"),
             discord.SelectOption(label="Weapons"),
@@ -207,11 +226,15 @@ class CategorySelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
+
         category = self.values[0]
 
         if category == "Enchants":
+
             await interaction.message.edit(view=None)
+
             await handle_final_request(interaction, "Enchants", "Enchanting")
+
             return
 
         await interaction.response.send_message(
@@ -221,17 +244,21 @@ class CategorySelect(discord.ui.Select):
 
 
 class CategoryView(discord.ui.View):
+
     def __init__(self):
         super().__init__(timeout=300)
         self.add_item(CategorySelect())
 
 
 class TicketView(discord.ui.View):
+
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Create Ticket", style=discord.ButtonStyle.green, custom_id="create_ticket")
+
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+
         channel = interaction.channel
         user = interaction.user
 
@@ -271,7 +298,14 @@ class TicketView(discord.ui.View):
 
 
 async def send_ticket_panel():
+
+    await bot.wait_until_ready()
+
     channel = bot.get_channel(TICKET_CHANNEL_ID)
+
+    if channel is None:
+        print("Ticket channel not found.")
+        return
 
     notice_embed = discord.Embed(
         title="<a:tcgold:1482787632411840512> Please help out crafters by tipping 1.5k for each craft. <a:tcgold:1482787632411840512>",
@@ -295,9 +329,19 @@ async def send_ticket_panel():
 
 @bot.event
 async def on_ready():
+
     bot.add_view(TicketView())
+
     print(f"Logged in as {bot.user}")
+
     await send_ticket_panel()
 
 
-bot.run(TOKEN)
+if __name__ == "__main__":
+
+    if not TOKEN:
+        raise ValueError("DISCORD_TOKEN is not set.")
+
+    threading.Thread(target=run_web, daemon=True).start()
+
+    bot.run(TOKEN)
