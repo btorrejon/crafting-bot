@@ -1,0 +1,303 @@
+import asyncio
+import discord
+from discord.ext import commands
+
+TOKEN = "MTQ4MTQ1MjQzNDM2NTYxMjI3Mw.GOp2nH.nlTFb1oo6kmqN5ZSwOYjdUAAaWCtRCEv-Mz9ZU"
+TICKET_CHANNEL_ID = 1481103607670505472
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.guilds = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+CATEGORY_CONFIG = {
+    "Armor": {
+        "suboptions": {
+            "Cloth": "Tailoring",
+            "Leather/Mail": "Leatherworking",
+            "Plate": "Blacksmithing",
+            "Head/Wrist/Boots (single stat armor)": "Engineering",
+        }
+    },
+    "Weapons": {
+        "suboptions": {
+            "Swords/Axes/Maces/Daggers/Polearms": "Blacksmithing",
+            "Bows/Staves/Offhands": "Inscription",
+            "Guns": "Engineering",
+        }
+    },
+    "Consumables": {
+        "suboptions": {
+            "Flasks/Potions": "Alchemy",
+            "Treatise": "Inscription",
+            "Gems": "Jewelcrafting",
+        }
+    },
+    "Enchants": {
+        "role": "Enchanting"
+    }
+}
+
+
+def can_close_thread(user, requester_id):
+    return user.id == requester_id or user.guild_permissions.administrator
+
+
+class AbortCraftView(discord.ui.View):
+    def __init__(self, requester_id):
+        super().__init__(timeout=None)
+        self.requester_id = requester_id
+
+    @discord.ui.button(label="Abort Crafting Request", style=discord.ButtonStyle.red, emoji="✖️")
+    async def abort(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.channel, discord.Thread):
+            await interaction.response.send_message(
+                "This button can only be used inside a ticket thread.",
+                ephemeral=True
+            )
+            return
+
+        if not can_close_thread(interaction.user, self.requester_id):
+            await interaction.response.send_message(
+                "Only the thread creator or an admin can abort this request.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message("Closing thread...", ephemeral=True)
+        await interaction.channel.delete()
+
+
+class CloseNowView(discord.ui.View):
+    def __init__(self, requester_id):
+        super().__init__(timeout=180)
+        self.requester_id = requester_id
+
+    @discord.ui.button(label="Close Now", style=discord.ButtonStyle.red, emoji="🗑️")
+    async def close_now(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not can_close_thread(interaction.user, self.requester_id):
+            await interaction.response.send_message(
+                "Only the thread creator or an admin can close this.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message("Closing thread...", ephemeral=True)
+        await interaction.channel.delete()
+
+
+class CompleteCraftView(discord.ui.View):
+    def __init__(self, requester_id, crafter_role):
+        super().__init__(timeout=None)
+        self.requester_id = requester_id
+        self.crafter_role = crafter_role
+
+    @discord.ui.button(label="Completed", style=discord.ButtonStyle.green, emoji="✅")
+    async def complete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role = discord.utils.get(interaction.guild.roles, name=self.crafter_role)
+
+        if role is None or role not in interaction.user.roles:
+            await interaction.response.send_message(
+                f"Only the {self.crafter_role} role can complete this request.",
+                ephemeral=True
+            )
+            return
+
+        button.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        requester = interaction.guild.get_member(self.requester_id)
+
+        if requester:
+            await interaction.channel.send(
+                f"{requester.mention} The crafting order is completed, this thread will now close in 3 minutes."
+            )
+        else:
+            await interaction.channel.send(
+                "The crafting order is completed, this thread will now close in 3 minutes."
+            )
+
+        await interaction.channel.edit(locked=True)
+        await interaction.channel.send(view=CloseNowView(self.requester_id))
+
+        await asyncio.sleep(180)
+        await interaction.channel.delete()
+
+
+async def handle_final_request(interaction, display_label, role_name):
+    user = interaction.user
+    thread = interaction.channel
+    guild = interaction.guild
+
+    await thread.edit(name=f"{display_label} - {user.name}")
+    await thread.send("Please list all the things you want crafted.")
+
+    def check(m):
+        return m.author == user and m.channel == thread
+
+    msg = await bot.wait_for("message", check=check)
+
+    role = discord.utils.get(guild.roles, name=role_name)
+
+    if role:
+        await thread.send(
+            f"{role.mention} {user.display_name} needs an item crafted: **{msg.content}**"
+        )
+    else:
+        await thread.send(
+            f"{user.display_name} needs an item crafted: **{msg.content}**"
+        )
+
+    await thread.send(
+        "Click below when this crafting request has been completed.",
+        view=CompleteCraftView(user.id, role_name)
+    )
+
+
+class SubcategorySelect(discord.ui.Select):
+    def __init__(self, category):
+        self.category = category
+        sub = CATEGORY_CONFIG[category]["suboptions"]
+
+        options = [discord.SelectOption(label=name) for name in sub]
+
+        super().__init__(
+            placeholder=f"Choose {category} type",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        choice = self.values[0]
+        role = CATEGORY_CONFIG[self.category]["suboptions"][choice]
+
+        self.disabled = True
+        await interaction.response.edit_message(
+            content=f"Selected: **{choice}**",
+            view=self.view
+        )
+
+        await handle_final_request(interaction, choice, role)
+
+
+class SubcategoryView(discord.ui.View):
+    def __init__(self, category):
+        super().__init__(timeout=300)
+        self.add_item(SubcategorySelect(category))
+
+
+class CategorySelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Armor"),
+            discord.SelectOption(label="Weapons"),
+            discord.SelectOption(label="Consumables"),
+            discord.SelectOption(label="Enchants"),
+        ]
+
+        super().__init__(
+            placeholder="Choose what you need crafted",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        category = self.values[0]
+
+        if category == "Enchants":
+            await interaction.message.edit(view=None)
+            await handle_final_request(interaction, "Enchants", "Enchanting")
+            return
+
+        await interaction.response.send_message(
+            f"Please choose a {category.lower()} type:",
+            view=SubcategoryView(category)
+        )
+
+
+class CategoryView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.add_item(CategorySelect())
+
+
+class TicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Create Ticket", style=discord.ButtonStyle.green, custom_id="create_ticket")
+    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = interaction.channel
+        user = interaction.user
+
+        thread = await channel.create_thread(
+            name=f"ticket-{user.name}",
+            type=discord.ChannelType.private_thread
+        )
+
+        await thread.add_user(user)
+
+        await thread.send(
+            "If you made this thread by mistake or no longer need a craft, click below to cancel it.",
+            view=AbortCraftView(user.id)
+        )
+
+        notice_embed = discord.Embed(
+            title="<a:tcgold:1482787632411840512> Please help out crafters by tipping 1.5k for each craft. <a:tcgold:1482787632411840512>",
+            description=(
+                "Finishing reagents are very useful for helping crafters do crafts for everyone.\n"
+                "These usually cost 1k-2k, and crafters usually have to buy it themselves.\n\n"
+                "Thank you."
+            ),
+            color=discord.Color.purple()
+        )
+
+        await thread.send(embed=notice_embed)
+
+        await thread.send(
+            f"{user.display_name}, please choose the type of crafting request below:",
+            view=CategoryView()
+        )
+
+        await interaction.response.send_message(
+            f"Your ticket has been created: {thread.mention}",
+            ephemeral=True
+        )
+
+
+async def send_ticket_panel():
+    channel = bot.get_channel(TICKET_CHANNEL_ID)
+
+    notice_embed = discord.Embed(
+        title="<a:tcgold:1482787632411840512> Please help out crafters by tipping 1.5k for each craft. <a:tcgold:1482787632411840512>",
+        description=(
+            "Finishing reagents are very useful for helping crafters do crafts for everyone.\n"
+            "These usually cost 1k-2k, and crafters usually have to buy it themselves.\n\n"
+            "Thank you."
+        ),
+        color=discord.Color.purple()
+    )
+
+    panel_embed = discord.Embed(
+        title="Crafting Requests",
+        description="Click the button below to open a crafting ticket.",
+        color=discord.Color.green()
+    )
+
+    await channel.send(embed=notice_embed)
+    await channel.send(embed=panel_embed, view=TicketView())
+
+
+@bot.event
+async def on_ready():
+    bot.add_view(TicketView())
+    print(f"Logged in as {bot.user}")
+    await send_ticket_panel()
+
+
+bot.run(TOKEN)
