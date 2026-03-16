@@ -17,9 +17,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 app = Flask(__name__)
 
+
 @app.get("/")
 def health():
     return "Bot is running", 200
+
 
 def run_web():
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
@@ -54,12 +56,23 @@ CATEGORY_CONFIG = {
 }
 
 
-def can_close_thread(user, requester_id):
+def can_close_thread(user: discord.Member, requester_id: int) -> bool:
     return user.id == requester_id or user.guild_permissions.administrator
 
 
+async def find_existing_thread_for_user(parent_channel: discord.TextChannel, user_id: int):
+    for thread in parent_channel.threads:
+        try:
+            members = [member async for member in thread.fetch_members()]
+            if any(member.id == user_id for member in members):
+                return thread
+        except Exception:
+            continue
+    return None
+
+
 class AbortCraftView(discord.ui.View):
-    def __init__(self, requester_id):
+    def __init__(self, requester_id: int):
         super().__init__(timeout=None)
         self.requester_id = requester_id
 
@@ -72,7 +85,7 @@ class AbortCraftView(discord.ui.View):
             )
             return
 
-        if not can_close_thread(interaction.user, self.requester_id):
+        if not isinstance(interaction.user, discord.Member) or not can_close_thread(interaction.user, self.requester_id):
             await interaction.response.send_message(
                 "Only the thread creator or an admin can abort this request.",
                 ephemeral=True
@@ -84,13 +97,13 @@ class AbortCraftView(discord.ui.View):
 
 
 class CloseNowView(discord.ui.View):
-    def __init__(self, requester_id):
+    def __init__(self, requester_id: int):
         super().__init__(timeout=180)
         self.requester_id = requester_id
 
     @discord.ui.button(label="Close Now", style=discord.ButtonStyle.red, emoji="🗑️")
     async def close_now(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not can_close_thread(interaction.user, self.requester_id):
+        if not isinstance(interaction.user, discord.Member) or not can_close_thread(interaction.user, self.requester_id):
             await interaction.response.send_message(
                 "Only the thread creator or an admin can close this.",
                 ephemeral=True
@@ -102,7 +115,7 @@ class CloseNowView(discord.ui.View):
 
 
 class CompleteCraftView(discord.ui.View):
-    def __init__(self, requester_id, crafter_role):
+    def __init__(self, requester_id: int, crafter_role: str):
         super().__init__(timeout=None)
         self.requester_id = requester_id
         self.crafter_role = crafter_role
@@ -139,18 +152,31 @@ class CompleteCraftView(discord.ui.View):
         await interaction.channel.delete()
 
 
-async def handle_final_request(interaction, display_label, role_name):
+async def handle_final_request(interaction: discord.Interaction, display_label: str, role_name: str, requester_id: int):
     user = interaction.user
     thread = interaction.channel
     guild = interaction.guild
 
+    if user.id != requester_id:
+        await interaction.followup.send(
+            "Only the person who opened this thread can continue this crafting request.",
+            ephemeral=True
+        )
+        return
+
     await thread.edit(name=f"{display_label} - {user.name}")
     await thread.send("Please list all the things you want crafted.")
 
-    def check(m):
-        return m.author == user and m.channel == thread
+    def check(m: discord.Message):
+        return m.author.id == user.id and m.channel.id == thread.id
 
-    msg = await bot.wait_for("message", check=check)
+    try:
+        msg = await bot.wait_for("message", check=check, timeout=300)
+    except asyncio.TimeoutError:
+        await thread.send("Timed out waiting for your crafting details. Closing thread...")
+        await asyncio.sleep(5)
+        await thread.delete()
+        return
 
     role = discord.utils.get(guild.roles, name=role_name)
 
@@ -170,8 +196,9 @@ async def handle_final_request(interaction, display_label, role_name):
 
 
 class SubcategorySelect(discord.ui.Select):
-    def __init__(self, category):
+    def __init__(self, category: str, requester_id: int):
         self.category = category
+        self.requester_id = requester_id
         sub = CATEGORY_CONFIG[category]["suboptions"]
 
         options = [discord.SelectOption(label=name) for name in sub]
@@ -184,6 +211,13 @@ class SubcategorySelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the person who opened this thread can use this menu.",
+                ephemeral=True
+            )
+            return
+
         choice = self.values[0]
         role = CATEGORY_CONFIG[self.category]["suboptions"][choice]
 
@@ -193,17 +227,19 @@ class SubcategorySelect(discord.ui.Select):
             view=self.view
         )
 
-        await handle_final_request(interaction, choice, role)
+        await handle_final_request(interaction, choice, role, self.requester_id)
 
 
 class SubcategoryView(discord.ui.View):
-    def __init__(self, category):
+    def __init__(self, category: str, requester_id: int):
         super().__init__(timeout=300)
-        self.add_item(SubcategorySelect(category))
+        self.add_item(SubcategorySelect(category, requester_id))
 
 
 class CategorySelect(discord.ui.Select):
-    def __init__(self):
+    def __init__(self, requester_id: int):
+        self.requester_id = requester_id
+
         options = [
             discord.SelectOption(label="Armor"),
             discord.SelectOption(label="Weapons"),
@@ -219,23 +255,35 @@ class CategorySelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        category = self.values[0]
-
-        if category == "Enchants":
-            await interaction.message.edit(view=None)
-            await handle_final_request(interaction, "Enchants", "Enchanting")
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Only the person who opened this thread can use this menu.",
+                ephemeral=True
+            )
             return
 
-        await interaction.response.send_message(
+        category = self.values[0]
+
+        self.disabled = True
+        await interaction.response.edit_message(
+            content=f"Selected: **{category}**",
+            view=self.view
+        )
+
+        if category == "Enchants":
+            await handle_final_request(interaction, "Enchants", "Enchanting", self.requester_id)
+            return
+
+        await interaction.followup.send(
             f"Please choose a {category.lower()} type:",
-            view=SubcategoryView(category)
+            view=SubcategoryView(category, self.requester_id)
         )
 
 
 class CategoryView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, requester_id: int):
         super().__init__(timeout=300)
-        self.add_item(CategorySelect())
+        self.add_item(CategorySelect(requester_id))
 
 
 class TicketView(discord.ui.View):
@@ -246,6 +294,21 @@ class TicketView(discord.ui.View):
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         channel = interaction.channel
         user = interaction.user
+
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "This button can only be used in a text channel.",
+                ephemeral=True
+            )
+            return
+
+        existing_thread = await find_existing_thread_for_user(channel, user.id)
+        if existing_thread is not None:
+            await interaction.response.send_message(
+                f"You already have an open crafting request: {existing_thread.mention}",
+                ephemeral=True
+            )
+            return
 
         thread = await channel.create_thread(
             name=f"ticket-{user.name}",
@@ -273,7 +336,7 @@ class TicketView(discord.ui.View):
 
         await thread.send(
             f"{user.display_name}, please choose the type of crafting request below:",
-            view=CategoryView()
+            view=CategoryView(user.id)
         )
 
         await interaction.response.send_message(
