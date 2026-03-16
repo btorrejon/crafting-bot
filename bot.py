@@ -72,7 +72,7 @@ async def find_existing_thread_for_user(parent_channel: discord.TextChannel, use
 
 
 async def auto_close_thread_after_24_hours(thread: discord.Thread):
-    await asyncio.sleep(86400)  # 24 hours
+    await asyncio.sleep(86400)
 
     try:
         await thread.delete()
@@ -157,13 +157,6 @@ class CompleteCraftView(discord.ui.View):
             await interaction.channel.send(
                 "The crafting order is completed, this thread will automatically close in 24 hours or you can close it manually by clicking the close thread button."
             )
-
-        try:
-            await interaction.channel.edit(locked=True)
-        except discord.Forbidden:
-            print("Missing permission to lock thread.")
-        except Exception as e:
-            print(f"Error locking thread: {e}")
 
         await interaction.channel.send(view=CloseNowView(self.requester_id))
 
@@ -333,7 +326,6 @@ class TicketView(discord.ui.View):
 
         await thread.add_user(user)
 
-        # Start 24-hour auto-close timer from thread creation
         asyncio.create_task(auto_close_thread_after_24_hours(thread))
 
         await thread.send(
