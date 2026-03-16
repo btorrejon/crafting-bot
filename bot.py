@@ -71,6 +71,19 @@ async def find_existing_thread_for_user(parent_channel: discord.TextChannel, use
     return None
 
 
+async def auto_close_thread_after_24_hours(thread: discord.Thread):
+    await asyncio.sleep(86400)  # 24 hours
+
+    try:
+        await thread.delete()
+    except discord.NotFound:
+        pass
+    except discord.Forbidden:
+        print("Missing permission to delete thread after 24 hours.")
+    except Exception as e:
+        print(f"Error auto-closing thread after 24 hours: {e}")
+
+
 class AbortCraftView(discord.ui.View):
     def __init__(self, requester_id: int):
         super().__init__(timeout=None)
@@ -98,7 +111,7 @@ class AbortCraftView(discord.ui.View):
 
 class CloseNowView(discord.ui.View):
     def __init__(self, requester_id: int):
-        super().__init__(timeout=180)
+        super().__init__(timeout=None)
         self.requester_id = requester_id
 
     @discord.ui.button(label="Close Now", style=discord.ButtonStyle.red, emoji="🗑️")
@@ -138,18 +151,21 @@ class CompleteCraftView(discord.ui.View):
 
         if requester:
             await interaction.channel.send(
-                f"{requester.mention} The crafting order is completed, this thread will now close in 3 minutes."
+                f"{requester.mention} The crafting order is completed, this thread will automatically close in 24 hours or you can close it manually by clicking the close thread button."
             )
         else:
             await interaction.channel.send(
-                "The crafting order is completed, this thread will now close in 3 minutes."
+                "The crafting order is completed, this thread will automatically close in 24 hours or you can close it manually by clicking the close thread button."
             )
 
-        await interaction.channel.edit(locked=True)
-        await interaction.channel.send(view=CloseNowView(self.requester_id))
+        try:
+            await interaction.channel.edit(locked=True)
+        except discord.Forbidden:
+            print("Missing permission to lock thread.")
+        except Exception as e:
+            print(f"Error locking thread: {e}")
 
-        await asyncio.sleep(180)
-        await interaction.channel.delete()
+        await interaction.channel.send(view=CloseNowView(self.requester_id))
 
 
 async def handle_final_request(interaction: discord.Interaction, display_label: str, role_name: str, requester_id: int):
@@ -316,6 +332,9 @@ class TicketView(discord.ui.View):
         )
 
         await thread.add_user(user)
+
+        # Start 24-hour auto-close timer from thread creation
+        asyncio.create_task(auto_close_thread_after_24_hours(thread))
 
         await thread.send(
             "If you made this thread by mistake or no longer need a craft, click below to cancel it.",
