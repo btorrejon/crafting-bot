@@ -127,6 +127,10 @@ class CompleteCraftView(discord.ui.View):
             await interaction.channel.send(
                 f"{requester.mention} The crafting order is completed, this thread will now close in 3 minutes."
             )
+        else:
+            await interaction.channel.send(
+                "The crafting order is completed, this thread will now close in 3 minutes."
+            )
 
         await interaction.channel.edit(locked=True)
         await interaction.channel.send(view=CloseNowView(self.requester_id))
@@ -141,8 +145,7 @@ async def handle_final_request(interaction, display_label, role_name):
     guild = interaction.guild
 
     await thread.edit(name=f"{display_label} - {user.name}")
-
-    await interaction.response.send_message("Please list all the things you want crafted.")
+    await thread.send("Please list all the things you want crafted.")
 
     def check(m):
         return m.author == user and m.channel == thread
@@ -154,6 +157,10 @@ async def handle_final_request(interaction, display_label, role_name):
     if role:
         await thread.send(
             f"{role.mention} {user.display_name} needs an item crafted: **{msg.content}**"
+        )
+    else:
+        await thread.send(
+            f"{user.display_name} needs an item crafted: **{msg.content}**"
         )
 
     await thread.send(
@@ -181,7 +188,6 @@ class SubcategorySelect(discord.ui.Select):
         role = CATEGORY_CONFIG[self.category]["suboptions"][choice]
 
         self.disabled = True
-
         await interaction.response.edit_message(
             content=f"Selected: **{choice}**",
             view=self.view
@@ -285,7 +291,6 @@ async def send_ticket_panel():
         print("Ticket channel not found.")
         return
 
-    # Check whether the panel already exists
     async for message in channel.history(limit=50):
         if message.author == bot.user and message.components:
             for row in message.components:
