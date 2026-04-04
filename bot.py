@@ -34,6 +34,7 @@ CATEGORY_CONFIG = {
             "Leather/Mail": "Leatherworking",
             "Plate": "Blacksmithing",
             "Head/Wrist/Boots (single stat armor)": "Engineering",
+            "Rings/Necks": "Jewelcrafting",
         }
     },
     "Weapons": {
